@@ -23,6 +23,14 @@ def main():
         web.REGISTRY = root / "manager.sqlite3"
         web.EXPORT = root / "peers.json"
         web.STATUS_FILE = root / "statuses.json"
+        assert web.connect_uri("123456789") == "rustdesk://connection/new/123456789"
+        assert "%22" in web.connect_uri('123"456')
+        assert "%3C" in web.connect_uri("123<script>")
+        try:
+            web.connect_uri("id\nmalicious")
+            assert False, "Unsafe ID accepted"
+        except ValueError:
+            pass
         web.PASSWORD_FILE = root / "admin-password"
         web.PASSWORD_FILE.write_text("initial-admin-password-12345")
         web.EXPORT.write_text(json.dumps({
