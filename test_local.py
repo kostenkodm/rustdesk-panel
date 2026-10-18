@@ -19,6 +19,10 @@ def load(name):
 
 
 def run():
+    # Regression: Docker bind-mounted source file can have a stale inode after mv.
+    # Both forward upgrade and rollback must recreate the web container.
+    upgrade = (ROOT / "scripts" / "upgrade.sh").read_text("utf-8")
+    assert upgrade.count("up -d --no-deps --force-recreate web") == 2
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         old = root / "db_v2.sqlite3"
