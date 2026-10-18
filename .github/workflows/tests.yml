@@ -1,0 +1,21 @@
+name: Python smoke tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile sources
+        run: python -m py_compile web.py exporter.py test_local.py
+      - name: Run local smoke tests
+        run: python test_local.py
