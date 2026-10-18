@@ -47,3 +47,28 @@ services:
     restart: unless-stopped
     depends_on:
       - exporter
+
+  # Probes HBBS via its ordinary 21115/TCP OnlineRequest interface.
+  # This service has network access but no secrets and no published ports.
+  status:
+    image: python:3.12-alpine
+    container_name: rustdesk-panel-status
+    command: ["python", "-B", "/app/status_worker.py"]
+    network_mode: bridge
+    user: "${PANEL_UID:-1026}:${PANEL_GID:-100}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./status_worker.py:/app/status_worker.py:ro
+      - ./status_probe.py:/app/status_probe.py:ro
+      - ./shared:/data
+    environment:
+      PEERS_JSON: /data/peers.json
+      STATUS_JSON: /data/statuses.json
+      HBBS_STATUS_HOST: "${HBBS_STATUS_HOST:-${NAS_BIND_IP:-127.0.0.1}}"
+      HBBS_STATUS_PORT: "${HBBS_STATUS_PORT:-21115}"
+      STATUS_INTERVAL: "20"
+    restart: unless-stopped
