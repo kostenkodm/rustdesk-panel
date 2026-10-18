@@ -159,7 +159,7 @@ h1 {{font-size:27px;margin:0}} h2 {{font-size:18px;margin:0 0 12px}}
 header {{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:22px}}
 section,article {{border:1px solid var(--edge);background:var(--panel);padding:18px;border-radius:13px;margin-bottom:14px}}
 small,.muted {{color:var(--muted)}} label {{display:block;color:var(--muted);margin:10px 0;font-size:13px}}
-input,textarea {{display:block;width:100%;border-radius:8px;border:1px solid var(--edge);background:#101d2b;color:var(--text);padding:10px;font:inherit}}
+input,textarea,select {{display:block;width:100%;border-radius:8px;border:1px solid var(--edge);background:#101d2b;color:var(--text);padding:10px;font:inherit}}
 textarea {{min-height:70px;resize:vertical}} button {{background:var(--blue);border:0;color:#10253c;border-radius:8px;padding:10px 15px;cursor:pointer;font-weight:700}}
 a {{color:var(--blue)}} .cards {{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:12px}}
 .cards article {{margin:0;min-width:0}} .cards strong {{overflow-wrap:anywhere}}
@@ -182,7 +182,7 @@ a {{color:var(--blue)}} .cards {{display:grid;grid-template-columns:repeat(auto-
 .status-unknown {{background:#614e2e;color:#ffe1a3}}
 
 
-</style></head><body><main>{content}<p class="muted"><small>RustDesk Panel MVP · Онлайн-статусы из HBBS являются моментальным снимком; панель не управляет правами подключений RustDesk.</small></p></main></body></html>"""
+</style></head><body><main>{content}<p class="muted"><small>RustDesk Panel 0.4 · Онлайн-статусы из HBBS являются моментальным снимком; панель не управляет правами подключений RustDesk.</small></p></main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -377,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
 <input name="group_name" maxlength="80" placeholder="Например, Дом или Серверы"></label>
 <button>Применить к выбранным</button></form>
 <small>Отметь устройства ниже. Пустая группа убирает привязку.</small></section>"""
-        header = f"""<header><div><h1>RustDesk Panel <small>0.2</small></h1>
+        header = f"""<header><div><h1>RustDesk Panel <small>0.4</small></h1>
 <p class="muted">Каталог устройств RustDesk OSS</p></div>
 <nav><a href="/books">Адресные книги</a> &nbsp;
 {'<a href="/users">Пользователи</a> &nbsp;' if user["role"] == "admin" else ''}
