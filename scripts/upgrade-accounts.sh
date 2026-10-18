@@ -26,15 +26,30 @@ schema_ok() {
       "import os,sqlite3; p=os.path.join(os.getenv('STATE_DIR','/state'),'manager.sqlite3'); db=sqlite3.connect('file:'+p+'?mode=ro',uri=True); assert db.execute('select count(*) from users where username=? and role=? and active=1',('admin','admin')).fetchone()[0]>=1; assert db.execute('select count(*) from address_books').fetchone()[0]>=1" \
       >/dev/null 2>&1
 }
+modules_ok() {
+    # python -c uses container WORKDIR ("/"), not the script directory ("/app").
+    # Explicitly add the directory of bind-mounted modules to sys.path.
+    docker exec rustdesk-panel-web python -B -c \
+      'import sys; sys.path.insert(0, "/app"); import accounts, panel_pages' \
+      >/dev/null 2>&1
+}
 wait_web() {
     i=0
     while [ "$i" -lt 15 ]; do
-        if health && schema_ok && docker exec rustdesk-panel-web python -B -c 'import accounts,panel_pages' >/dev/null 2>&1; then
+        if health && schema_ok && modules_ok; then
             return 0
         fi
         i=$((i+1))
         sleep 2
     done
+    echo "==> Диагностика проверок (без секретов):"
+    if health; then echo "HTTP /healthz: OK"; else echo "HTTP /healthz: FAIL"; fi
+    if schema_ok; then echo "Схема SQLite пользователей и книг: OK"; else echo "Схема SQLite пользователей и книг: FAIL"; fi
+    if modules_ok; then echo "Импорт Python-модулей из /app: OK"; else
+        echo "Импорт Python-модулей из /app: FAIL"
+        docker exec rustdesk-panel-web python -B -c \
+          'import sys; sys.path.insert(0, "/app"); import accounts, panel_pages' 2>&1 || true
+    fi
     return 1
 }
 rollback() {
