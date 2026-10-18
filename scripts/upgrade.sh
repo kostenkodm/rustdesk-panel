@@ -1,6 +1,6 @@
 #!/bin/sh
-# RustDesk Panel web-only upgrade from the public main branch.
-# Intentionally does not touch HBBS/HBBR, RustDesk keys or Compose configuration.
+# RustDesk Panel: safe web-only upgrade; preserve the existing bind-mounted inode.
+# Does not reconfigure, stop or restart HBBS/HBBR.
 set -eu
 umask 077
 
@@ -15,60 +15,86 @@ trap cleanup 0
 trap 'exit 130' 2
 trap 'exit 143' 15
 
+health() {
+    docker exec rustdesk-panel-web python -B -c \
+      "import http.client; c=http.client.HTTPConnection('127.0.0.1', 8765, timeout=3); c.request('GET','/healthz'); r=c.getresponse(); assert r.status==200 and r.read()==b'OK'" \
+      >/dev/null 2>&1
+}
+
+wait_for_health() {
+    attempt=0
+    while [ "$attempt" -lt 15 ]; do
+        if health; then return 0; fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    return 1
+}
+
+diagnostics() {
+    echo "==> Контейнер и последние сообщения журнала:"
+    docker compose -f compose.yaml ps || true
+    docker logs --tail 35 rustdesk-panel-web 2>&1 || true
+}
+
 command -v docker >/dev/null 2>&1 || fail "docker не найден"
 command -v wget >/dev/null 2>&1 || fail "wget не найден"
-[ -f "$ROOT/compose.yaml" ] || fail "compose.yaml не найден в $ROOT"
-[ -f "$ROOT/web.py" ] || fail "web.py не найден в $ROOT"
-[ -f "$ROOT/state/manager.sqlite3" ] || fail "База панели не найдена. Не обновляем незавершённую установку."
+[ -f "$ROOT/compose.yaml" ] || fail "compose.yaml не найден: $ROOT"
+[ -f "$ROOT/web.py" ] || fail "web.py не найден: $ROOT"
+[ -f "$ROOT/state/manager.sqlite3" ] || fail "База панели отсутствует; откройте docs/INSTALL.md"
 cd "$ROOT"
 
-echo "==> Скачивание новой версии web.py"
-TMP="$(mktemp /tmp/rustdesk-panel-web.XXXXXX)" || fail "mktemp"
-wget -q -O "$TMP" "$URL" || fail "Не удалось скачать web.py; действующая версия не затронута"
-[ -s "$TMP" ] || fail "Скачанный файл пустой"
-grep -q "def export_inventory_csv" "$TMP" || fail "Файл не похож на RustDesk Panel 0.2"
+echo "==> Скачивание новой версии"
+TMP="$(mktemp /tmp/rustdesk-panel-upgrade.XXXXXX)" || fail "mktemp"
+wget -q -O "$TMP" "$URL" || fail "Не удалось скачать web.py; рабочая панель не затронута"
+[ -s "$TMP" ] || fail "Скачанный файл пуст"
+grep -q 'def export_inventory_csv' "$TMP" || fail "Не найдены функции RustDesk Panel 0.2"
 
-echo "==> Проверка синтаксиса Python"
+echo "==> Проверка синтаксиса"
 docker run --rm --network none -v "$TMP:/src/web.py:ro" python:3.12-alpine \
   python -B -c "import ast; ast.parse(open('/src/web.py', encoding='utf-8').read())" \
-  || fail "Ошибка синтаксиса, действующая версия не затронута"
+  || fail "Синтаксическая ошибка; рабочая панель не затронута"
 
-echo "==> Остановка только rustdesk-panel-web"
-docker compose -f compose.yaml stop web || fail "Не удалось остановить web"
+echo "==> Останавливаем только веб-контейнер"
+docker compose -f compose.yaml stop web || fail "Не удалось остановить веб-панель"
 
 BACKUP="$BACKUP_ROOT/rustdesk-panel-$(date +%Y%m%d-%H%M%S)-$$"
-mkdir -p "$BACKUP" || fail "Не удалось создать резервный каталог. Перезапусти web."
-cp -p web.py "$BACKUP/web.py" || fail "Не удалось сохранить web.py. Перезапусти web."
-cp -a state "$BACKUP/state" || fail "Не удалось сохранить SQLite. Перезапусти web."
+mkdir -p "$BACKUP" || { docker compose -f compose.yaml start web || true; fail "Не удалось создать каталог резервной копии"; }
+cp -p web.py "$BACKUP/web.py" || { docker compose -f compose.yaml start web || true; fail "Не удалось сохранить web.py"; }
+cp -a state "$BACKUP/state" || { docker compose -f compose.yaml start web || true; fail "Не удалось сохранить базу панели"; }
 echo "Резервная копия: $BACKUP"
 
-# Move only the source file. No .env, keys, state, compose or HBBS paths changed.
-cp "$TMP" web.py.next || fail "Не удалось подготовить web.py.next. Перезапусти web."
-chmod 644 web.py.next
-mv web.py.next web.py
-
-echo "==> Запуск новой версии панели"
-docker compose -f compose.yaml up -d web || true
-
-i=0
-while [ "$i" -lt 12 ]; do
-    if docker exec rustdesk-panel-web python -B -c \
-      "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).read() == b'OK'" \
-      >/dev/null 2>&1; then
-        echo "SUCCESS: RustDesk Panel обновлена до версии 0.2."
-        echo "Backup: $BACKUP"
-        docker compose -f compose.yaml ps
-        exit 0
-    fi
-    i=$((i+1))
-    sleep 2
-done
-
-echo "==> Новая версия не прошла health-check. Возвращаем прежний web.py."
-docker compose -f compose.yaml stop web || true
-cp -p "$BACKUP/web.py" web.py || fail "Не удалось восстановить web.py автоматически"
+# CRITICAL: web.py is a Docker bind-mounted file.
+# Do not replace it using mv/rename: preserve its inode and mount reference.
+if ! cat "$TMP" > web.py; then
+    cat "$BACKUP/web.py" > web.py || true
+    docker compose -f compose.yaml start web || true
+    fail "Не удалось записать web.py"
+fi
 chmod 644 web.py
-docker compose -f compose.yaml up -d web || fail "Откат выполнен, но старый web не запускается. Проверьте журналы."
-echo "ERROR: health-check failed; restored previous web.py."
+
+echo "==> Запуск RustDesk Panel 0.2"
+docker compose -f compose.yaml start web || true
+
+if wait_for_health && docker exec rustdesk-panel-web grep -q 'def export_inventory_csv' /app/web.py; then
+    echo "SUCCESS: RustDesk Panel 0.2 работает, HBBS/HBBR не затронуты."
+    echo "Backup: $BACKUP"
+    docker compose -f compose.yaml ps
+    exit 0
+fi
+
+echo "==> Проверка не пройдена. Сохраняем диагностику и выполняем откат."
+diagnostics
+docker compose -f compose.yaml stop web || true
+cat "$BACKUP/web.py" > web.py || fail "Не удалось восстановить web.py из $BACKUP"
+chmod 644 web.py
+docker compose -f compose.yaml start web || fail "Старый web.py восстановлен, но контейнер не запустился"
+
+if wait_for_health; then
+    echo "ROLLBACK OK: прежняя панель снова отвечает /healthz"
+else
+    echo "WARNING: исходный код восстановлен, но веб-сервис не прошёл health-check"
+    diagnostics
+fi
 echo "Backup: $BACKUP"
 exit 1
