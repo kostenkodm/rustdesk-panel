@@ -41,6 +41,8 @@ services:
       STATE_DIR: /state
     volumes:
       - ./web.py:/app/web.py:ro
+      - ./accounts.py:/app/accounts.py:ro
+      - ./panel_pages.py:/app/panel_pages.py:ro
       - ./state:/state
       - ./shared:/peers:ro
       - ./admin-password:/run/secrets/admin_password:ro

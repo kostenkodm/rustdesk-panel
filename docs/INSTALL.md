@@ -75,7 +75,7 @@ PANEL_GID=100
 \`\`\`sh
 cd /volume3/docker/rustdesk-panel
 # Synology may extract code with restrictive umask (600) causing Errno 13 in non-root web container.
-chmod 644 web.py exporter.py
+chmod 644 web.py exporter.py accounts.py panel_pages.py status_probe.py status_worker.py
 mkdir -p state shared
 chown 1026:100 state shared
 chmod 700 state
@@ -127,7 +127,7 @@ docker logs --tail 30 rustdesk-panel-web
 
 Если список пуст: \`docker logs --tail 50 rustdesk-panel-exporter\` и \`ls -l /volume3/docker/rustdeskhbbs/db_v2.sqlite3\`. Проверить, что в базе действительно есть таблица \`peer\`: схема БД зависит от версии HBBS.
 
-Если контейнер web перезапускается с ошибкой `python: can't open file '/app/web.py': [Errno 13] Permission denied`, проверьте `ls -ln web.py` и выполните `chmod 644 web.py exporter.py`, затем `docker compose -f compose.yaml restart web`. Не применяйте `chmod -R` ко всему каталогу.
+Если контейнер web перезапускается с ошибкой `python: can't open file '/app/web.py': [Errno 13] Permission denied`, проверьте `ls -ln web.py` и выполните `chmod 644 web.py exporter.py accounts.py panel_pages.py status_probe.py status_worker.py`, затем `docker compose -f compose.yaml restart web`. Не применяйте `chmod -R` ко всему каталогу.
 
 Если на экране ошибка прав: \`ls -ldn state shared admin-password\`; веб-контейнер работает под UID/GID из .env.
 
@@ -150,6 +150,7 @@ docker compose -f compose.yaml down
 
 \`\`\`sh
 python3 test_local.py
+python3 test_accounts.py
 \`\`\`
 
 Тест создаёт временную искусственную БД HBBS, проверяет импорт, вход в панель, экранирование HTML и проверку CSRF, затем удаляет тестовые данные.
