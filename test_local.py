@@ -43,7 +43,19 @@ def run():
         web.PASSWORD_FILE = root / "password"
         web.PASSWORD_FILE.write_text("example-test-password-12345")
         web.EXPORT.write_text(json.dumps(data))
+        # Emulate an existing 0.1 database to test its in-place migration.
+        with sqlite3.connect(web.REGISTRY) as db:
+            db.execute("""CREATE TABLE devices (
+                id TEXT PRIMARY KEY, alias TEXT NOT NULL DEFAULT '',
+                group_name TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT ''
+            )""")
+            db.execute("INSERT INTO devices(id,alias,group_name,note) VALUES (?,?,?,?)",
+                       ("legacy-device", "Old device", "Старые", "legacy note"))
         web.init_db()
+        with web.connect() as db:
+            row = db.execute("SELECT alias,group_name,note,favorite FROM devices WHERE id=?",
+                             ("legacy-device",)).fetchone()
+            assert tuple(row) == ("Old device", "Старые", "legacy note", 0)
 
         server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -54,7 +66,7 @@ def run():
             headers = {}
             body = None
             if fields is not None:
-                body = urllib.parse.urlencode(fields)
+                body = urllib.parse.urlencode(fields, doseq=True)
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
             if cookie:
                 headers["Cookie"] = cookie
@@ -89,7 +101,57 @@ def run():
                 "id": "test", "csrf": "wrong"
             }, cookie=cookie)
             assert response.status == 403
-            print("PASS: exporter, login, inventory, escaping and CSRF checks")
+            response, _ = request("POST", "/favorite", {
+                "id": "123456789", "csrf": csrf
+            }, cookie=cookie)
+            assert response.status == 303
+            with web.connect() as db:
+                assert db.execute("SELECT favorite FROM devices WHERE id='123456789'").fetchone()[0] == 1
+
+            response, body = request("GET", "/?favorites=1", cookie=cookie)
+            assert response.status == 200 and "123456789" in body
+            assert "legacy-device" not in body
+
+            response, _ = request("POST", "/bulk-group", {
+                "selected": ["123456789", "legacy-device"],
+                "group_name": "Серверы",
+                "csrf": csrf
+            }, cookie=cookie)
+            assert response.status == 303
+            with web.connect() as db:
+                rows = db.execute(
+                    "SELECT id,group_name,note FROM devices WHERE id IN ('123456789','legacy-device')"
+                ).fetchall()
+            assert len(rows) == 2 and all(r["group_name"] == "Серверы" for r in rows)
+            assert next(r for r in rows if r["id"] == "legacy-device")["note"] == "legacy note"
+
+            response, body = request("GET", "/?group=" + urllib.parse.quote("Серверы"),
+                                     cookie=cookie)
+            assert response.status == 200 and "legacy-device" in body
+
+            response, _ = request("POST", "/device", {
+                "id": "123456789", "alias": "=HYPERLINK(1,2)",
+                "group_name": "Серверы", "csrf": csrf
+            }, cookie=cookie)
+            assert response.status == 303
+            response, csv_body = request("GET", "/export.csv", cookie=cookie)
+            assert response.status == 200
+            assert response.getheader("Content-Type").startswith("text/csv")
+            assert "'=HYPERLINK(1,2)" in csv_body and "legacy-device" in csv_body
+            assert "DO_NOT_EXPORT" not in csv_body
+
+            response, body = request("GET", "/export.csv")
+            assert response.getheader("Content-Type").startswith("text/html")
+            assert "legacy-device" not in body
+
+            response, _ = request("POST", "/bulk-group", {
+                "selected": ["unknown-id"],
+                "group_name": "wrong",
+                "csrf": csrf
+            }, cookie=cookie)
+            assert response.status == 400
+
+            print("PASS: migration, login, catalog, group filter, bulk edit, favorite, CSV and CSRF")
         finally:
             conn.close()
             server.shutdown()
