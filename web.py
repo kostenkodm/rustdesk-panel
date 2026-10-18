@@ -17,7 +17,7 @@ import sqlite3
 import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 STATE = Path(os.getenv("STATE_DIR", "/state"))
 REGISTRY = STATE / "manager.sqlite3"
@@ -32,6 +32,16 @@ MAX_BODY = 20000
 
 def escape(value):
     return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def connect_uri(peer_id):
+    """Launch the locally installed RustDesk client. No credentials in URL."""
+    if not isinstance(peer_id, str) or not (1 <= len(peer_id) <= 128):
+        raise ValueError("Invalid RustDesk ID")
+    if any(ord(c) < 32 or ord(c) == 127 for c in peer_id):
+        raise ValueError("Invalid RustDesk ID")
+    return "rustdesk://connection/new/" + quote(peer_id, safe="")
+
 
 
 def connect():
@@ -177,6 +187,8 @@ a {{color:var(--blue)}} .cards {{display:grid;grid-template-columns:repeat(auto-
 .favorite-button {{background:#33485c;color:#eaf2ff}}
 .favorite-button[aria-pressed="true"] {{background:#f7dc91;color:#372600}}
 .action-link {{margin-left:10px}}
+.connect-link {{display:inline-block;background:var(--blue);color:#10253c;padding:9px 14px;border-radius:8px;text-decoration:none;font-weight:700;margin:7px 0 10px}}
+
 .status-online {{background:#214c38;color:#b8efd1}}
 .status-offline {{background:#414653;color:#e6e9ef}}
 .status-unknown {{background:#614e2e;color:#ffe1a3}}
@@ -437,6 +449,12 @@ class Handler(BaseHTTPRequestHandler):
 <label>Заметка<textarea name="note" maxlength="1200">{escape(saved.get("note",""))}</textarea></label>
 <button>Сохранить</button></form>""" if user["role"] != "viewer" else
             f'<p class="meta">{escape(saved.get("note",""))}</p>')
+            try:
+                link = escape(connect_uri(device_id))
+            except ValueError:
+                link = ""
+            connect_html = (f'<p><a class="connect-link" href="{link}">Подключиться в RustDesk</a></p>'
+                            if link else "")
             cards.append(f"""<article>
 <div class="device-head"><div>
 {selection_html}<strong>{escape(alias)}</strong>
@@ -446,6 +464,7 @@ class Handler(BaseHTTPRequestHandler):
 <span class="pill status-{status}">{status_label}</span>
 <span class="pill">{"В реестре HBBS" if device_id in peers else "Добавлено вручную"}</span>
 <p class="meta">{escape(info.get("os","ОС неизвестна"))} · {escape(info.get("username",""))}</p>
+{connect_html}
 {editor_html}</article>""")
         extra = f"""<section><h2>Добавить устройство вручную</h2>
 <form action="/device" method="post"><input type="hidden" name="csrf" value="{csrf}">
