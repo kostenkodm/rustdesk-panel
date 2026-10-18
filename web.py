@@ -21,6 +21,8 @@ STATE = Path(os.getenv("STATE_DIR", "/state"))
 REGISTRY = STATE / "manager.sqlite3"
 EXPORT = Path(os.getenv("PEERS_EXPORT", "/peers/peers.json"))
 PASSWORD_FILE = Path(os.getenv("ADMIN_PASSWORD_FILE", "/run/secrets/admin_password"))
+STATUS_FILE = Path(os.getenv("STATUS_FILE", "/peers/statuses.json"))
+STATUS_MAX_AGE = 75
 PORT = int(os.getenv("PORT", "8765"))
 SESSION_LIFETIME = 8 * 3600
 MAX_BODY = 20000
@@ -89,6 +91,26 @@ def read_peers():
         return {"ok": False, "error": "Экспорт HBBS ещё не доступен"}, {}
 
 
+def read_statuses(now=None):
+    """Use only fresh successful HBBS snapshots; otherwise all statuses unknown."""
+    stamp = int(time.time() if now is None else now)
+    try:
+        data = json.loads(STATUS_FILE.read_text("utf-8"))
+        t = data.get("timestamp")
+        if (data.get("ok") is not True
+                or not isinstance(t, int)
+                or not 0 <= stamp - t <= STATUS_MAX_AGE):
+            return {}, None
+        raw = data.get("devices")
+        if not isinstance(raw, dict):
+            return {}, None
+        states = {key: state for key, state in raw.items()
+                  if isinstance(key, str) and state in ("online", "offline")}
+        return states, stamp - t
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}, None
+
+
 def safe_csv_cell(value):
     text = str(value if value is not None else "")
     # Prevent formula execution on opening an export in Excel or LibreOffice.
@@ -152,8 +174,12 @@ a {{color:var(--blue)}} .cards {{display:grid;grid-template-columns:repeat(auto-
 .favorite-button {{background:#33485c;color:#eaf2ff}}
 .favorite-button[aria-pressed="true"] {{background:#f7dc91;color:#372600}}
 .action-link {{margin-left:10px}}
+.status-online {{background:#214c38;color:#b8efd1}}
+.status-offline {{background:#414653;color:#e6e9ef}}
+.status-unknown {{background:#614e2e;color:#ffe1a3}}
 
-</style></head><body><main>{content}<p class="muted"><small>RustDesk Panel MVP · Не показывает достоверный онлайн-статус и не управляет правами подключения RustDesk.</small></p></main></body></html>"""
+
+</style></head><body><main>{content}<p class="muted"><small>RustDesk Panel MVP · Онлайн-статусы из HBBS являются моментальным снимком; панель не управляет правами подключений RustDesk.</small></p></main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -245,6 +271,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         export, peers = read_peers()
+        states, status_age = read_statuses()
         with connect() as db:
             own = {row["id"]: dict(row) for row in db.execute(
                 "SELECT id,alias,group_name,note,favorite FROM devices"
@@ -261,6 +288,22 @@ class Handler(BaseHTTPRequestHandler):
         query = params.get("q", [""])[0][:120]
         group_filter = params.get("group", [""])[0][:80]
         favorites_only = params.get("favorites", [""])[0] == "1"
+        status_filter = params.get("status", [""])[0]
+        if status_filter not in ("online", "offline", "unknown"):
+            status_filter = ""
+        def device_status(device_id):
+            return states.get(device_id, "unknown")
+        counts = {name: sum(device_status(device_id) == name for device_id in ids)
+                  for name in ("online", "offline", "unknown")}
+        status_options = []
+        for value, label in (("", "Любой статус"), ("online", "Онлайн"),
+                             ("offline", "Офлайн"), ("unknown", "Нет данных")):
+            status_options.append('<option value="' + value + '"' +
+                                  (' selected' if status_filter == value else '') +
+                                  '>' + label + '</option>')
+        status_info = (f"Последняя проверка HBBS: {status_age} сек. назад"
+                       if status_age is not None else
+                       "Статус HBBS недоступен или устарел")
         options = ['<option value="">Все группы</option>']
         options.append('<option value="__ungrouped__"' +
                        (' selected' if group_filter == "__ungrouped__" else '') +
@@ -274,10 +317,15 @@ class Handler(BaseHTTPRequestHandler):
 <form action="/logout" method="post"><input type="hidden" name="csrf" value="{csrf}"><button>Выйти</button></form></header>
 <div class="stats"><section>Всего устройств<b>{len(ids)}</b></section>
 <section>В реестре HBBS<b>{len(peers)}</b></section><section>Групп<b>{len(groups)}</b></section>
-<section>Избранных<b>{sum(bool(v.get("favorite")) for v in own.values())}</b></section></div>
+<section>Избранных<b>{sum(bool(v.get("favorite")) for v in own.values())}</b></section>
+<section>Онлайн<b>{counts["online"]}</b></section>
+<section>Офлайн<b>{counts["offline"]}</b></section>
+<section>Нет данных<b>{counts["unknown"]}</b></section></div>
+<p class="muted">{escape(status_info)}. Для новых сведений обновите страницу.</p>
 <section><form action="/" method="get" class="controls">
 <label>Поиск<input name="q" type="search" value="{escape(query)}" placeholder="ID, название, ОС, группа"></label>
 <label>Группа<select name="group">{''.join(options)}</select></label>
+<label>Доступность<select name="status">{''.join(status_options)}</select></label>
 <label><input type="checkbox" name="favorites" value="1" {'checked' if favorites_only else ''}>Только избранные</label>
 <button>Фильтровать</button><a class="action-link" href="/export.csv">Скачать CSV</a>
 </form></section>
@@ -306,6 +354,11 @@ class Handler(BaseHTTPRequestHandler):
             favorite = bool(saved.get("favorite", 0))
             if favorites_only and not favorite:
                 continue
+            status = device_status(device_id)
+            if status_filter and status != status_filter:
+                continue
+            status_label = {"online": "Онлайн", "offline": "Офлайн",
+                            "unknown": "Нет данных"}[status]
             cards.append(f"""<article>
 <div class="device-head"><div>
 <label><input form="bulk-form" class="device-pick" type="checkbox" name="selected" value="{escape(device_id)}">
@@ -317,7 +370,8 @@ class Handler(BaseHTTPRequestHandler):
 <button class="favorite-button" type="submit" aria-label="Избранное" aria-pressed="{'true' if favorite else 'false'}">{'★' if favorite else '☆'}</button>
 </form></div>
 <span class="pill">{escape(group or "Без группы")}</span>
-<span class="pill">{"Есть в HBBS (не онлайн-статус)" if device_id in peers else "Добавлено вручную"}</span>
+<span class="pill status-{status}">{status_label}</span>
+<span class="pill">{"В реестре HBBS" if device_id in peers else "Добавлено вручную"}</span>
 <p class="meta">{escape(info.get("os","ОС неизвестна"))} · {escape(info.get("username",""))}</p>
 <form action="/device" method="post"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="id" value="{escape(device_id)}">
@@ -332,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
 <label>Группа<input name="group_name" maxlength="80"></label>
 <label>Заметка<textarea name="note" maxlength="1200"></textarea></label>
 <button>Добавить</button></form></section>"""
-        header += f'<p class="muted">Показано устройств: {len(cards)} из {len(ids)}. Сервер HBBS не сообщает здесь достоверный онлайн-статус.</p>'
+        header += f'<p class="muted">Показано устройств: {len(cards)} из {len(ids)}. Статусы получены из OnlineRequest HBBS; это не проверка доступности удалённого рабочего стола.</p>'
         self.reply(document("RustDesk Panel", header + '<div class="cards">' + "".join(cards) + "</div>" + extra))
 
     def do_POST(self):

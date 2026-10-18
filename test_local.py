@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import threading
 import urllib.parse
 
@@ -44,6 +45,7 @@ def run():
         web.STATE = root
         web.REGISTRY = root / "panel.sqlite3"
         web.EXPORT = root / "peers.json"
+        web.STATUS_FILE = root / "statuses.json"
         web.PASSWORD_FILE = root / "password"
         web.PASSWORD_FILE.write_text("example-test-password-12345")
         web.EXPORT.write_text(json.dumps(data))
@@ -89,6 +91,33 @@ def run():
             response, body = request("GET", "/", cookie=cookie)
             assert response.status == 200
             assert "123456789" in body and "TEST_PC" in body
+            assert "Нет данных" in body  # missing status snapshot
+            web.STATUS_FILE.write_text(json.dumps({
+                "ok": True, "timestamp": int(time.time()),
+                "devices": {"123456789": "online", "legacy-device": "offline"}
+            }), encoding="utf-8")
+            response, body = request("GET", "/", cookie=cookie)
+            assert "Онлайн" in body and "Офлайн" in body
+            response, body = request("GET", "/?status=online", cookie=cookie)
+            assert "TEST_PC" in body and "legacy-device" not in body
+            response, body = request("GET", "/?status=offline", cookie=cookie)
+            assert "legacy-device" in body and "TEST_PC" not in body
+            # Expired / failed status data must never be presented as offline.
+            web.STATUS_FILE.write_text(json.dumps({
+                "ok": False, "timestamp": int(time.time()),
+                "devices": {"123456789": "offline"}
+            }))
+            response, body = request("GET", "/?status=unknown", cookie=cookie)
+            assert "123456789" in body and "Нет данных" in body
+            web.STATUS_FILE.write_text(json.dumps({
+                "ok": True, "timestamp": int(time.time()) - 1000,
+                "devices": {"123456789": "offline"}
+            }))
+            assert web.read_statuses()[0] == {}
+            web.STATUS_FILE.write_text(json.dumps({
+                "ok": True, "timestamp": int(time.time()),
+                "devices": {"123456789": "online", "legacy-device": "offline"}
+            }))
 
             with web.connect() as db:
                 csrf = db.execute("SELECT csrf FROM sessions").fetchone()[0]
