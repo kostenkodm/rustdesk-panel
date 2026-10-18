@@ -18,7 +18,7 @@
 wget -q -O /tmp/rustdesk-panel-upgrade.sh https://raw.githubusercontent.com/kostenkodm/rustdesk-panel/main/scripts/upgrade.sh && sh /tmp/rustdesk-panel-upgrade.sh
 ```
 
-Скрипт сначала скачает и проверит Python-код, затем **остановит только веб-панель**, создаст резервную копию базы в `/volume2/dsm-recovery`, запустит обновление и проверит HTTP health-check. Если проверка не пройдёт, он автоматически вернёт предыдущий `web.py`. `HBBS` и `HBBR` не затрагиваются.
+Обновлённый скрипт сохраняет файловую привязку Docker (в отличие от замены через mv), а при ошибке выводит журнал приложения. Скрипт сначала скачает и проверит Python-код, затем **остановит только веб-панель**, создаст резервную копию базы в `/volume2/dsm-recovery`, запустит обновление и проверит HTTP health-check. Если проверка не пройдёт, он автоматически вернёт предыдущий `web.py`. `HBBS` и `HBBR` не затрагиваются.
 
 Ручной способ ниже оставлен для диагностики и восстановления.
 
@@ -55,7 +55,9 @@ test -s web.py.next || { echo "STOP: новая версия не скачана
 docker run --rm --network none -v "$PWD/web.py.next:/src/web.py:ro" python:3.12-alpine python -B -c "import ast; ast.parse(open('/src/web.py', encoding='utf-8').read())"
 
 chmod 644 web.py.next
-mv web.py.next web.py
+# Preserve the inode of the existing Docker bind-mounted source.
+cat web.py.next > web.py
+rm -f web.py.next
 docker compose -f compose.yaml up -d web
 
 docker compose -f compose.yaml ps
