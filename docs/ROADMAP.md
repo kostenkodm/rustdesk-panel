@@ -19,8 +19,9 @@
 - [ ] Users and access roles inside the panel, 2FA.
 - [ ] Audit administrative actions.
 - [x] Proof-of-protocol: read-only HBBS OnlineRequest CLI query and mocked protocol tests.
-- [ ] Validate the OnlineRequest probe against the real NAS before enabling UI badges.
-- [ ] Device last-seen / online state only if backed by reliable heartbeat data.
+- [x] Validate the OnlineRequest probe against the real NAS: 23 registered, 5 online, 18 offline at test time.
+- [x] Fresh HBBS OnlineRequest presence, automatic polling, staleness handling and UI filters.
+- [ ] First/last seen historical timelines: persist verified polling events only if desired.
 - [ ] Secure invitation/onboarding flow.
 - [ ] Version inventory and configuration management with authenticated agent or client API.
 
