@@ -1,0 +1,49 @@
+name: rustdesk-panel
+
+services:
+  exporter:
+    image: python:3.12-alpine
+    container_name: rustdesk-panel-exporter
+    command: ["python", "-B", "/app/exporter.py"]
+    network_mode: none
+    user: "0:100"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./exporter.py:/app/exporter.py:ro
+      - ${HBBS_DIR:?Set HBBS_DIR in .env}:/hbbs:ro
+      - ./shared:/out
+    environment:
+      HBBS_DB: /hbbs/db_v2.sqlite3
+      EXPORT_PATH: /out/peers.json
+      SYNC_SECONDS: "60"
+    restart: unless-stopped
+
+  web:
+    image: python:3.12-alpine
+    container_name: rustdesk-panel-web
+    command: ["python", "-B", "/app/web.py"]
+    user: "${PANEL_UID:-1026}:${PANEL_GID:-100}"
+    ports:
+      - "${NAS_BIND_IP:-127.0.0.1}:8765:8765"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      PORT: "8765"
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      PEERS_EXPORT: /peers/peers.json
+      STATE_DIR: /state
+    volumes:
+      - ./web.py:/app/web.py:ro
+      - ./state:/state
+      - ./shared:/peers:ro
+      - ./admin-password:/run/secrets/admin_password:ro
+    restart: unless-stopped
+    depends_on:
+      - exporter
