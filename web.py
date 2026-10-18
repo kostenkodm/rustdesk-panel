@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import accounts
+import panel_pages
 import hashlib
 import io
 import hmac
@@ -73,6 +75,7 @@ def init_db():
             digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000)
             db.execute("INSERT INTO admin VALUES (1, ?, ?)", (salt, digest))
         db.execute("DELETE FROM sessions WHERE expires <= ?", (int(time.time()),))
+        accounts.schema(db)
 
 
 def read_peers():
@@ -220,9 +223,11 @@ class Handler(BaseHTTPRequestHandler):
             return None
         key = hashlib.sha256(token.encode()).hexdigest()
         with connect() as db:
-            row = db.execute("SELECT csrf,expires FROM sessions WHERE token_hash=?", (key,)).fetchone()
-        if row and row["expires"] > int(time.time()):
-            return (key, row["csrf"])
+            row = db.execute("SELECT csrf,expires,user_id FROM sessions WHERE token_hash=?", (key,)).fetchone()
+            if row and row["expires"] > int(time.time()) and row["user_id"]:
+                user = accounts.user_by_id(db, row["user_id"])
+                if user:
+                    return (key, row["csrf"], user)
         return None
 
     def parse_body(self):
@@ -251,9 +256,62 @@ class Handler(BaseHTTPRequestHandler):
         if not session:
             login = """<h1>RustDesk Panel</h1><p class="muted">Локальная панель управления устройствами</p>
 <section style="max-width:420px"><form action="/login" method="post">
-<label>Пароль администратора<input type="password" name="password" required autocomplete="current-password"></label>
+<label>Логин<input name="username" required maxlength="64" autocomplete="username" value="admin"></label>
+<label>Пароль<input type="password" name="password" required autocomplete="current-password"></label>
 <button type="submit">Войти</button></form></section>"""
             self.reply(document("Вход", login))
+            return
+        user = session[2]
+        if path == "/users":
+            if user["role"] != "admin":
+                self.send_error(403)
+                return
+            with connect() as db:
+                body = panel_pages.users_page(db, user, session[1])
+            self.reply(document("Учётные записи", body))
+            return
+        if path == "/books":
+            params = parse_qs(urlsplit(self.path).query)
+            book_id = params.get("book", [""])[0]
+            _export, peers = read_peers()
+            try:
+                with connect() as db:
+                    body = panel_pages.books_page(db, user, session[1], book_id, peers)
+                self.reply(document("Адресные книги", body))
+            except (accounts.BadInput, accounts.AccessDenied):
+                self.send_error(403)
+            return
+        if path in ("/book/export.csv", "/book/export.json"):
+            params = parse_qs(urlsplit(self.path).query)
+            try:
+                book_id = int(params.get("book", [""])[0])
+                with connect() as db:
+                    book = accounts.book_access(db, user, book_id)
+                    contacts = accounts.contacts_in_book(db, book_id)
+                if path.endswith(".csv"):
+                    result = io.StringIO(newline="")
+                    writer = csv.writer(result)
+                    writer.writerow(["RustDesk ID", "Name", "Tags", "Note"])
+                    for entry in contacts:
+                        writer.writerow([safe_csv_cell(entry[field]) for field in
+                                         ("peer_id", "alias", "tags", "note")])
+                    output = ("\ufeff" + result.getvalue()).encode("utf-8")
+                    content_type, extension = "text/csv", "csv"
+                else:
+                    output = json.dumps({"name": book["name"], "entries": contacts},
+                                        ensure_ascii=False).encode("utf-8")
+                    content_type, extension = "application/json", "json"
+                self.send_response(200)
+                self.send_header("Content-Type", content_type + "; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="rustdesk-address-book.{extension}"')
+                self.send_header("Content-Length", str(len(output)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(output)
+            except (ValueError, accounts.AccessDenied):
+                self.send_error(403)
             return
         if path == "/export.csv":
             body = export_inventory_csv().encode("utf-8")
@@ -312,8 +370,18 @@ class Handler(BaseHTTPRequestHandler):
             options.append('<option value="' + escape(value) + '"' +
                            (' selected' if group_filter == value else '') +
                            '>' + escape(value) + '</option>')
+        bulk_html = "" if user["role"] == "viewer" else f"""<section><h2>Массовое изменение группы</h2>
+<form action="/bulk-group" method="post" id="bulk-form" class="controls">
+<input type="hidden" name="csrf" value="{csrf}">
+<label>Новая группа для отмеченных устройств
+<input name="group_name" maxlength="80" placeholder="Например, Дом или Серверы"></label>
+<button>Применить к выбранным</button></form>
+<small>Отметь устройства ниже. Пустая группа убирает привязку.</small></section>"""
         header = f"""<header><div><h1>RustDesk Panel <small>0.2</small></h1>
 <p class="muted">Каталог устройств RustDesk OSS</p></div>
+<nav><a href="/books">Адресные книги</a> &nbsp;
+{'<a href="/users">Пользователи</a> &nbsp;' if user["role"] == "admin" else ''}
+<span class="muted">{escape(user["username"])} · {escape(user["role"])}</span></nav>
 <form action="/logout" method="post"><input type="hidden" name="csrf" value="{csrf}"><button>Выйти</button></form></header>
 <div class="stats"><section>Всего устройств<b>{len(ids)}</b></section>
 <section>В реестре HBBS<b>{len(peers)}</b></section><section>Групп<b>{len(groups)}</b></section>
@@ -329,13 +397,7 @@ class Handler(BaseHTTPRequestHandler):
 <label><input type="checkbox" name="favorites" value="1" {'checked' if favorites_only else ''}>Только избранные</label>
 <button>Фильтровать</button><a class="action-link" href="/export.csv">Скачать CSV</a>
 </form></section>
-<section><h2>Массовое изменение группы</h2>
-<form action="/bulk-group" method="post" id="bulk-form" class="controls">
-<input type="hidden" name="csrf" value="{csrf}">
-<label>Новая группа для отмеченных устройств
-<input name="group_name" maxlength="80" placeholder="Например, Дом или Серверы"></label>
-<button>Применить к выбранным</button></form>
-<small>Отметь устройства ниже. Пустая группа убирает привязку.</small></section>"""
+{bulk_html}"""
         if not export.get("ok"):
             header += f'<div class="warning">Чтение HBBS: {escape(export.get("error","нет данных"))}. Ручные записи доступны.</div>'
         cards = []
@@ -359,33 +421,39 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             status_label = {"online": "Онлайн", "offline": "Офлайн",
                             "unknown": "Нет данных"}[status]
-            cards.append(f"""<article>
-<div class="device-head"><div>
-<label><input form="bulk-form" class="device-pick" type="checkbox" name="selected" value="{escape(device_id)}">
-<strong>{escape(alias)}</strong></label>
-<div class="meta">ID: {escape(device_id)}</div></div>
-<form action="/favorite" method="post">
+            selection_html = (f'<input form="bulk-form" class="device-pick" type="checkbox" '
+                              f'name="selected" value="{escape(device_id)}">'
+                              if user["role"] != "viewer" else "")
+            favorite_html = (f"""<form action="/favorite" method="post">
 <input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="id" value="{escape(device_id)}">
 <button class="favorite-button" type="submit" aria-label="Избранное" aria-pressed="{'true' if favorite else 'false'}">{'★' if favorite else '☆'}</button>
-</form></div>
-<span class="pill">{escape(group or "Без группы")}</span>
-<span class="pill status-{status}">{status_label}</span>
-<span class="pill">{"В реестре HBBS" if device_id in peers else "Добавлено вручную"}</span>
-<p class="meta">{escape(info.get("os","ОС неизвестна"))} · {escape(info.get("username",""))}</p>
-<form action="/device" method="post"><input type="hidden" name="csrf" value="{csrf}">
+</form>""" if user["role"] != "viewer" else "")
+            editor_html = (f"""<form action="/device" method="post">
+<input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="id" value="{escape(device_id)}">
 <label>Название<input name="alias" maxlength="120" value="{escape(saved.get("alias",""))}"></label>
 <label>Группа<input name="group_name" maxlength="80" value="{escape(group)}"></label>
 <label>Заметка<textarea name="note" maxlength="1200">{escape(saved.get("note",""))}</textarea></label>
-<button>Сохранить</button></form></article>""")
+<button>Сохранить</button></form>""" if user["role"] != "viewer" else
+            f'<p class="meta">{escape(saved.get("note",""))}</p>')
+            cards.append(f"""<article>
+<div class="device-head"><div>
+{selection_html}<strong>{escape(alias)}</strong>
+<div class="meta">ID: {escape(device_id)}</div></div>
+{favorite_html}</div>
+<span class="pill">{escape(group or "Без группы")}</span>
+<span class="pill status-{status}">{status_label}</span>
+<span class="pill">{"В реестре HBBS" if device_id in peers else "Добавлено вручную"}</span>
+<p class="meta">{escape(info.get("os","ОС неизвестна"))} · {escape(info.get("username",""))}</p>
+{editor_html}</article>""")
         extra = f"""<section><h2>Добавить устройство вручную</h2>
 <form action="/device" method="post"><input type="hidden" name="csrf" value="{csrf}">
 <label>RustDesk ID<input name="id" maxlength="128" required></label>
 <label>Название<input name="alias" maxlength="120"></label>
 <label>Группа<input name="group_name" maxlength="80"></label>
 <label>Заметка<textarea name="note" maxlength="1200"></textarea></label>
-<button>Добавить</button></form></section>"""
+<button>Добавить</button></form></section>""" if user["role"] != "viewer" else ""
         header += f'<p class="muted">Показано устройств: {len(cards)} из {len(ids)}. Статусы получены из OnlineRequest HBBS; это не проверка доступности удалённого рабочего стола.</p>'
         self.reply(document("RustDesk Panel", header + '<div class="cards">' + "".join(cards) + "</div>" + extra))
 
@@ -401,16 +469,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(403)
                 return
             with connect() as db:
-                row = db.execute("SELECT salt,digest FROM admin WHERE id=1").fetchone()
-            digest = hashlib.pbkdf2_hmac("sha256", password.encode(), row["salt"], 600000)
-            if not hmac.compare_digest(digest, row["digest"]):
+                user = accounts.authenticate(db, data.get("username", ""), password)
+            if not user:
                 time.sleep(0.6)
                 self.reply(document("Ошибка", '<h1>Неверный пароль</h1><a href="/">Назад</a>'), 403)
                 return
             token, csrf = secrets.token_urlsafe(36), secrets.token_urlsafe(32)
             with connect() as db:
-                db.execute("INSERT INTO sessions VALUES (?,?,?)",
-                           (hashlib.sha256(token.encode()).hexdigest(), csrf, int(time.time()) + SESSION_LIFETIME))
+                db.execute("INSERT INTO sessions(token_hash,csrf,expires,user_id) VALUES (?,?,?,?)",
+                           (hashlib.sha256(token.encode()).hexdigest(), csrf,
+                            int(time.time()) + SESSION_LIFETIME, user["id"]))
             self.redirect(cookie=f"rdm_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_LIFETIME}")
             return
 
@@ -422,7 +490,55 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as db:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (session[0],))
             self.redirect(cookie="rdm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+        elif path in ("/user/create", "/user/update", "/book/create",
+                       "/book/contact", "/book/remove", "/book/import-hbbs"):
+            user = session[2]
+            try:
+                if path in ("/user/create", "/user/update") and user["role"] != "admin":
+                    raise accounts.AccessDenied("Только администратор")
+                if path in ("/book/create", "/book/contact", "/book/remove",
+                             "/book/import-hbbs") and user["role"] == "viewer":
+                    raise accounts.AccessDenied("Нет прав на изменение")
+                with connect() as db:
+                    if path == "/user/create":
+                        accounts.new_user(db, data.get("username", ""),
+                                          data.get("password", ""), data.get("role", "viewer"))
+                    elif path == "/user/update":
+                        accounts.edit_user(db, user["id"], int(data.get("id", "")),
+                                           data.get("role", ""), int(data.get("active", "0")),
+                                           data.get("password", ""))
+                    elif path == "/book/create":
+                        accounts.create_book(db, user, data.get("name", ""),
+                                             data.get("scope", "personal") == "personal")
+                    else:
+                        book_id = int(data.get("book", ""))
+                        accounts.book_access(db, user, book_id, edit=True)
+                        if path == "/book/contact":
+                            accounts.save_contact(
+                                db, book_id, data.get("peer_id", ""), data.get("alias", ""),
+                                data.get("tags", ""), data.get("note", ""))
+                        elif path == "/book/remove":
+                            accounts.delete_contact(db, book_id, data.get("peer_id", ""))
+                        else:
+                            export, peers = read_peers()
+                            if export.get("ok") is not True or export.get("stale"):
+                                raise accounts.BadInput("Нет актуального экспорта HBBS")
+                            accounts.import_hbbs(db, book_id, peers)
+                if path.startswith("/user"):
+                    self.redirect("/users")
+                else:
+                    self.redirect("/books" if path == "/book/create"
+                                  else f"/books?book={book_id}")
+            except accounts.AccessDenied:
+                self.send_error(403)
+            except (accounts.BadInput, ValueError) as exc:
+                self.reply(document("Ошибка", f'<h1>Некорректные данные</h1><p>{escape(exc)}</p>'
+                                    '<a href="/">Вернуться</a>'), 400)
+            return
         elif path == "/favorite":
+            if session[2]["role"] == "viewer":
+                self.send_error(403)
+                return
             device_id = data.get("id", "").strip()
             if not device_id or len(device_id) > 128:
                 self.send_error(400)
@@ -440,6 +556,9 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute("INSERT INTO devices(id,favorite) VALUES (?,1)", (device_id,))
             self.redirect()
         elif path == "/bulk-group":
+            if session[2]["role"] == "viewer":
+                self.send_error(403)
+                return
             selected = data.get("selected", [])
             if not isinstance(selected, list) or not (1 <= len(selected) <= 500):
                 self.send_error(400)
@@ -461,6 +580,9 @@ class Handler(BaseHTTPRequestHandler):
                     [(device_id, group_name) for device_id in ids])
             self.redirect()
         elif path == "/device":
+            if session[2]["role"] == "viewer":
+                self.send_error(403)
+                return
             device_id = data.get("id", "").strip()
             if not device_id or len(device_id) > 128 or any(ord(c) < 32 for c in device_id):
                 self.send_error(400)
