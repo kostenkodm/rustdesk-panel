@@ -82,7 +82,7 @@ def run():
 
         try:
             response, body = request("GET", "/")
-            assert response.status == 200 and "Пароль администратора" in body
+            assert response.status == 200 and "Логин" in body and "Пароль" in body
 
             response, _ = request("POST", "/login", {"username": "admin", "password": "example-test-password-12345"})
             assert response.status == 303
