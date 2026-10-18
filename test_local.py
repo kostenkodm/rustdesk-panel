@@ -84,7 +84,7 @@ def run():
             response, body = request("GET", "/")
             assert response.status == 200 and "Пароль администратора" in body
 
-            response, _ = request("POST", "/login", {"password": "example-test-password-12345"})
+            response, _ = request("POST", "/login", {"username": "admin", "password": "example-test-password-12345"})
             assert response.status == 303
             cookie = response.getheader("Set-Cookie").split(";")[0]
 
