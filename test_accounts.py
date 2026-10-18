@@ -12,6 +12,11 @@ import web
 
 
 def main():
+    # Guard against the exact Synology failure: docker exec python -c starts
+    # outside /app, so explicit module path insertion is required.
+    upgrade = (Path(__file__).parent / "scripts" / "upgrade-accounts.sh").read_text("utf-8")
+    assert "sys.path.insert(0, \"/app\"); import accounts, panel_pages" in upgrade
+    assert "HTTP /healthz: " in upgrade and "Схема SQLite" in upgrade
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         web.STATE = root
