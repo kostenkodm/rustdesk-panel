@@ -2,7 +2,9 @@
 """Private inventory web UI for RustDesk OSS. Never writes to HBBS/HBBR."""
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import hmac
 import html
 import json
@@ -55,6 +57,10 @@ def init_db():
                 note TEXT NOT NULL DEFAULT ''
             );
         """)
+        # Upgrade existing 0.1 installations without losing device notes.
+        columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
+        if "favorite" not in columns:
+            db.execute("ALTER TABLE devices ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
         if not db.execute("SELECT 1 FROM admin WHERE id=1").fetchone():
             if not PASSWORD_FILE.is_file():
                 raise RuntimeError("admin-password отсутствует")
@@ -83,6 +89,39 @@ def read_peers():
         return {"ok": False, "error": "Экспорт HBBS ещё не доступен"}, {}
 
 
+def safe_csv_cell(value):
+    text = str(value if value is not None else "")
+    # Prevent formula execution on opening an export in Excel or LibreOffice.
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def export_inventory_csv():
+    _state, peers = read_peers()
+    with connect() as db:
+        own = {row["id"]: dict(row) for row in db.execute(
+            "SELECT id,alias,group_name,note,favorite FROM devices"
+        )}
+    result = io.StringIO(newline="")
+    writer = csv.writer(result)
+    writer.writerow(["RustDesk ID", "Name", "Group", "Favorite", "OS", "Source", "Note"])
+    for device_id in sorted(set(peers) | set(own), key=str.casefold):
+        saved = own.get(device_id, {})
+        info = peers.get(device_id, {})
+        values = [
+            device_id,
+            saved.get("alias") or info.get("device_name") or device_id,
+            saved.get("group_name") or "",
+            "yes" if saved.get("favorite") else "no",
+            info.get("os") or "",
+            "HBBS" if device_id in peers else "manual",
+            saved.get("note") or "",
+        ]
+        writer.writerow([safe_csv_cell(value) for value in values])
+    return "\ufeff" + result.getvalue()
+
+
 def document(title, content):
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -103,6 +142,17 @@ a {{color:var(--blue)}} .cards {{display:grid;grid-template-columns:repeat(auto-
 .stats {{display:flex;gap:12px;flex-wrap:wrap}} .stats section {{flex:1;min-width:150px}}
 .stats b {{display:block;font-size:26px}} .pill {{display:inline-block;border-radius:6px;padding:3px 8px;margin:5px 4px 5px 0;background:#314459;font-size:12px}}
 .warning {{padding:13px;background:#433222;border:1px solid #85653e;border-radius:9px;margin:12px 0}}
+.controls {{display:flex;align-items:end;flex-wrap:wrap;gap:14px}}
+.controls label {{flex:1;min-width:170px}}
+.controls select {{display:block;width:100%;border-radius:8px;border:1px solid var(--edge);background:#101d2b;color:var(--text);padding:10px;font:inherit}}
+.controls input[type="checkbox"],.device-pick {{width:auto;display:inline-block;margin-right:7px}}
+.device-head {{display:flex;gap:10px;align-items:start;justify-content:space-between}}
+.device-actions {{display:flex;align-items:center;gap:10px}}
+.device-actions form {{display:inline}}
+.favorite-button {{background:#33485c;color:#eaf2ff}}
+.favorite-button[aria-pressed="true"] {{background:#f7dc91;color:#372600}}
+.action-link {{margin-left:10px}}
+
 </style></head><body><main>{content}<p class="muted"><small>RustDesk Panel MVP · Не показывает достоверный онлайн-статус и не управляет правами подключения RustDesk.</small></p></main></body></html>"""
 
 
@@ -159,7 +209,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
             return None
         pairs = parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
-        return {key: values[0] for key, values in pairs.items() if values}
+        return {key: values if key == "selected" else values[0]
+                for key, values in pairs.items() if values}
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -178,24 +229,65 @@ class Handler(BaseHTTPRequestHandler):
 <button type="submit">Войти</button></form></section>"""
             self.reply(document("Вход", login))
             return
+        if path == "/export.csv":
+            body = export_inventory_csv().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="rustdesk-devices.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path != "/":
             self.reply(document("Не найдено", "<h1>Страница не найдена</h1>"), 404)
             return
 
         export, peers = read_peers()
         with connect() as db:
-            own = {row["id"]: dict(row) for row in db.execute("SELECT id,alias,group_name,note FROM devices")}
-        ids = sorted(set(peers) | set(own), key=str.casefold)
-        groups = {row["group_name"] for row in own.values() if row["group_name"]}
+            own = {row["id"]: dict(row) for row in db.execute(
+                "SELECT id,alias,group_name,note,favorite FROM devices"
+            )}
+        ids = sorted(set(peers) | set(own),
+                     key=lambda item: (
+                         not bool(own.get(item, {}).get("favorite")),
+                         (own.get(item, {}).get("alias") or peers.get(item, {}).get("device_name") or item).casefold()
+                     ))
+        groups = sorted({row["group_name"] for row in own.values() if row["group_name"]},
+                        key=str.casefold)
         csrf = escape(session[1])
-        query = parse_qs(urlsplit(self.path).query).get("q", [""])[0][:120]
-        header = f"""<header><div><h1>RustDesk Panel</h1>
+        params = parse_qs(urlsplit(self.path).query)
+        query = params.get("q", [""])[0][:120]
+        group_filter = params.get("group", [""])[0][:80]
+        favorites_only = params.get("favorites", [""])[0] == "1"
+        options = ['<option value="">Все группы</option>']
+        options.append('<option value="__ungrouped__"' +
+                       (' selected' if group_filter == "__ungrouped__" else '') +
+                       '>Без группы</option>')
+        for value in groups:
+            options.append('<option value="' + escape(value) + '"' +
+                           (' selected' if group_filter == value else '') +
+                           '>' + escape(value) + '</option>')
+        header = f"""<header><div><h1>RustDesk Panel <small>0.2</small></h1>
 <p class="muted">Каталог устройств RustDesk OSS</p></div>
 <form action="/logout" method="post"><input type="hidden" name="csrf" value="{csrf}"><button>Выйти</button></form></header>
 <div class="stats"><section>Всего устройств<b>{len(ids)}</b></section>
-<section>В HBBS<b>{len(peers)}</b></section><section>Групп<b>{len(groups)}</b></section></div>
-<section><form action="/" method="get"><label>Поиск по имени, ID, группе и ОС
-<input name="q" type="search" value="{escape(query)}"></label><button>Найти</button></form></section>"""
+<section>В реестре HBBS<b>{len(peers)}</b></section><section>Групп<b>{len(groups)}</b></section>
+<section>Избранных<b>{sum(bool(v.get("favorite")) for v in own.values())}</b></section></div>
+<section><form action="/" method="get" class="controls">
+<label>Поиск<input name="q" type="search" value="{escape(query)}" placeholder="ID, название, ОС, группа"></label>
+<label>Группа<select name="group">{''.join(options)}</select></label>
+<label><input type="checkbox" name="favorites" value="1" {'checked' if favorites_only else ''}>Только избранные</label>
+<button>Фильтровать</button><a class="action-link" href="/export.csv">Скачать CSV</a>
+</form></section>
+<section><h2>Массовое изменение группы</h2>
+<form action="/bulk-group" method="post" id="bulk-form" class="controls">
+<input type="hidden" name="csrf" value="{csrf}">
+<label>Новая группа для отмеченных устройств
+<input name="group_name" maxlength="80" placeholder="Например, Дом или Серверы"></label>
+<button>Применить к выбранным</button></form>
+<small>Отметь устройства ниже. Пустая группа убирает привязку.</small></section>"""
         if not export.get("ok"):
             header += f'<div class="warning">Чтение HBBS: {escape(export.get("error","нет данных"))}. Ручные записи доступны.</div>'
         cards = []
@@ -207,10 +299,25 @@ class Handler(BaseHTTPRequestHandler):
             haystack = " ".join([device_id, alias, group, str(info.get("os","")), str(info.get("username",""))]).casefold()
             if query.casefold() not in haystack:
                 continue
-            cards.append(f"""<article><strong>{escape(alias)}</strong>
-<div class="meta">ID: {escape(device_id)}</div>
+            if group_filter == "__ungrouped__" and group:
+                continue
+            if group_filter and group_filter != "__ungrouped__" and group_filter != group:
+                continue
+            favorite = bool(saved.get("favorite", 0))
+            if favorites_only and not favorite:
+                continue
+            cards.append(f"""<article>
+<div class="device-head"><div>
+<label><input form="bulk-form" class="device-pick" type="checkbox" name="selected" value="{escape(device_id)}">
+<strong>{escape(alias)}</strong></label>
+<div class="meta">ID: {escape(device_id)}</div></div>
+<form action="/favorite" method="post">
+<input type="hidden" name="csrf" value="{csrf}">
+<input type="hidden" name="id" value="{escape(device_id)}">
+<button class="favorite-button" type="submit" aria-label="Избранное" aria-pressed="{'true' if favorite else 'false'}">{'★' if favorite else '☆'}</button>
+</form></div>
 <span class="pill">{escape(group or "Без группы")}</span>
-<span class="pill">{"Есть в HBBS" if device_id in peers else "Добавлено вручную"}</span>
+<span class="pill">{"Есть в HBBS (не онлайн-статус)" if device_id in peers else "Добавлено вручную"}</span>
 <p class="meta">{escape(info.get("os","ОС неизвестна"))} · {escape(info.get("username",""))}</p>
 <form action="/device" method="post"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="id" value="{escape(device_id)}">
@@ -225,6 +332,7 @@ class Handler(BaseHTTPRequestHandler):
 <label>Группа<input name="group_name" maxlength="80"></label>
 <label>Заметка<textarea name="note" maxlength="1200"></textarea></label>
 <button>Добавить</button></form></section>"""
+        header += f'<p class="muted">Показано устройств: {len(cards)} из {len(ids)}. Сервер HBBS не сообщает здесь достоверный онлайн-статус.</p>'
         self.reply(document("RustDesk Panel", header + '<div class="cards">' + "".join(cards) + "</div>" + extra))
 
     def do_POST(self):
@@ -260,6 +368,44 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as db:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (session[0],))
             self.redirect(cookie="rdm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+        elif path == "/favorite":
+            device_id = data.get("id", "").strip()
+            if not device_id or len(device_id) > 128:
+                self.send_error(400)
+                return
+            with connect() as db:
+                row = db.execute("SELECT favorite FROM devices WHERE id=?", (device_id,)).fetchone()
+                if row:
+                    db.execute("UPDATE devices SET favorite=? WHERE id=?",
+                               (0 if row["favorite"] else 1, device_id))
+                else:
+                    _, peers = read_peers()
+                    if device_id not in peers:
+                        self.send_error(404)
+                        return
+                    db.execute("INSERT INTO devices(id,favorite) VALUES (?,1)", (device_id,))
+            self.redirect()
+        elif path == "/bulk-group":
+            selected = data.get("selected", [])
+            if not isinstance(selected, list) or not (1 <= len(selected) <= 500):
+                self.send_error(400)
+                return
+            group_name = data.get("group_name", "").strip()
+            if len(group_name) > 80:
+                self.send_error(400)
+                return
+            _, peers = read_peers()
+            with connect() as db:
+                known = set(peers) | {row[0] for row in db.execute("SELECT id FROM devices")}
+                ids = list(dict.fromkeys(selected))
+                if any(not item or len(item) > 128 or item not in known for item in ids):
+                    self.send_error(400)
+                    return
+                db.executemany(
+                    """INSERT INTO devices(id,group_name) VALUES (?,?)
+                    ON CONFLICT(id) DO UPDATE SET group_name=excluded.group_name""",
+                    [(device_id, group_name) for device_id in ids])
+            self.redirect()
         elif path == "/device":
             device_id = data.get("id", "").strip()
             if not device_id or len(device_id) > 128 or any(ord(c) < 32 for c in device_id):
