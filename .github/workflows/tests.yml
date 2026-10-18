@@ -17,5 +17,7 @@ jobs:
           python-version: "3.12"
       - name: Compile sources
         run: python -m py_compile web.py exporter.py test_local.py
+      - name: Validate NAS upgrade shell script
+        run: sh -n scripts/upgrade.sh
       - name: Run local smoke tests
         run: python test_local.py
