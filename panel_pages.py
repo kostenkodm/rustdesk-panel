@@ -117,7 +117,16 @@ def books_page(db, user, csrf, book_choice, peers):
 <button>Удалить из книги</button></form>'''
             else:
                 editor = f'<p class="meta">Метки: {esc(item["tags"])} · {esc(item["note"])}</p>'
-            header.append(f'<article><strong>{esc(item["alias"] or item["peer_id"])}</strong>'
-                          f'<div class="meta">ID: {esc(item["peer_id"])}</div>{editor}</article>')
+            peer_id = item["peer_id"]
+            # Never embed credentials in a deep link.
+            href = ("rustdesk://connection/new/" + quote(peer_id, safe="")
+                    if peer_id and len(peer_id) <= 128
+                    and not any(ord(c) < 32 or ord(c) == 127 for c in peer_id)
+                    else "")
+            launch = (f'<a class="connect-link" href="{esc(href)}">Подключиться в RustDesk</a>'
+                      if href else "")
+            header.append(f'<article><strong>{esc(item["alias"] or peer_id)}</strong>'
+                          f'<div class="meta">ID: {esc(peer_id)}</div>'
+                          f'<p>{launch}</p>{editor}</article>')
         header.append('</div>')
     return "".join(header)

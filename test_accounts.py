@@ -23,6 +23,14 @@ def main():
         web.REGISTRY = root / "manager.sqlite3"
         web.EXPORT = root / "peers.json"
         web.STATUS_FILE = root / "statuses.json"
+        assert web.connect_uri("123456789") == "rustdesk://connection/new/123456789"
+        assert "%22" in web.connect_uri('123"456')
+        assert "%3C" in web.connect_uri("123<script>")
+        try:
+            web.connect_uri("id\nmalicious")
+            assert False, "Unsafe ID accepted"
+        except ValueError:
+            pass
         web.PASSWORD_FILE = root / "admin-password"
         web.PASSWORD_FILE.write_text("initial-admin-password-12345")
         web.EXPORT.write_text(json.dumps({
@@ -113,6 +121,9 @@ def main():
             assert request("GET", "/users", cookie=admin_cookie)[0] == 200
             assert request("GET", "/users", cookie=viewer_cookie)[0] == 403
             assert "Адресные книги" in request("GET", "/", cookie=viewer_cookie)[1]
+            # Clicking the card opens local RustDesk client, never exposes passwords.
+            assert 'href="rustdesk://connection/new/123456789"' in request(
+                "GET", "/", cookie=viewer_cookie)[1]
             assert request("GET", "/books", cookie=editor_cookie)[0] == 200
             assert request("GET", "/book/export.json?book=99999", cookie=viewer_cookie)[0] == 403
             with web.connect() as db:
@@ -141,6 +152,8 @@ def main():
             }, editor_cookie)[0] == 303
             status, body, _ = request("GET", f"/books?book={shared_id}", cookie=viewer_cookie)
             assert status == 200 and "&lt;img" in body and "<img" not in body
+            assert 'href="rustdesk://connection/new/123456789"' in body
+            assert "password=" not in body
             assert request("GET", f"/book/export.csv?book={shared_id}",
                            cookie=viewer_cookie)[0] == 200
             status, content, _ = request("GET", f"/book/export.csv?book={shared_id}",
