@@ -50,7 +50,6 @@ class TestProtocol(unittest.TestCase):
         with socketserver.TCPServer(("127.0.0.1", 0), OnlineHandler) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
-            ids = [f"test-{i % 10}" + f"-{i}" for i in range(205)]
             # Explicit bit order: first, third and tenth digit suffix only.
             ids = [f"test-{i}-{i % 10}" for i in range(205)]
             statuses = sp.probe_online("127.0.0.1", server.server_address[1], ids)
