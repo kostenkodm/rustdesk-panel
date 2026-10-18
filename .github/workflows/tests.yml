@@ -16,11 +16,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile sources
-        run: python -m py_compile web.py exporter.py status_probe.py status_worker.py test_local.py test_status.py test_worker.py
+        run: python -m py_compile web.py accounts.py panel_pages.py exporter.py status_probe.py status_worker.py test_local.py test_accounts.py test_status.py test_worker.py
       - name: Validate NAS upgrade shell script
         run: sh -n scripts/upgrade.sh scripts/upgrade-online.sh
       - name: Run local smoke tests
         run: python test_local.py
+      - name: Run user and address book tests
+        run: python test_accounts.py
       - name: Run OSS protocol tests
         run: python test_status.py
       - name: Run status worker tests
