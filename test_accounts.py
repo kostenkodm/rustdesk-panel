@@ -113,6 +113,9 @@ def main():
             assert request("GET", "/users", cookie=admin_cookie)[0] == 200
             assert request("GET", "/users", cookie=viewer_cookie)[0] == 403
             assert "Адресные книги" in request("GET", "/", cookie=viewer_cookie)[1]
+            # Clicking the card opens local RustDesk client, never exposes passwords.
+            assert 'href="rustdesk://connection/new/123456789"' in request(
+                "GET", "/", cookie=viewer_cookie)[1]
             assert request("GET", "/books", cookie=editor_cookie)[0] == 200
             assert request("GET", "/book/export.json?book=99999", cookie=viewer_cookie)[0] == 403
             with web.connect() as db:
@@ -141,6 +144,8 @@ def main():
             }, editor_cookie)[0] == 303
             status, body, _ = request("GET", f"/books?book={shared_id}", cookie=viewer_cookie)
             assert status == 200 and "&lt;img" in body and "<img" not in body
+            assert 'href="rustdesk://connection/new/123456789"' in body
+            assert "password=" not in body
             assert request("GET", f"/book/export.csv?book={shared_id}",
                            cookie=viewer_cookie)[0] == 200
             status, content, _ = request("GET", f"/book/export.csv?book={shared_id}",
