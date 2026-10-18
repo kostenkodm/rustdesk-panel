@@ -74,7 +74,9 @@ fi
 chmod 644 web.py
 
 echo "==> Запуск RustDesk Panel 0.2"
-docker compose -f compose.yaml start web || true
+# Force new container to rebind /app/web.py to the current host inode.
+# A previous update used 'mv', so 'start' can retain a stale inode forever.
+docker compose -f compose.yaml up -d --no-deps --force-recreate web || true
 
 if wait_for_health && docker exec rustdesk-panel-web grep -q 'def export_inventory_csv' /app/web.py; then
     echo "SUCCESS: RustDesk Panel 0.2 работает, HBBS/HBBR не затронуты."
@@ -88,7 +90,7 @@ diagnostics
 docker compose -f compose.yaml stop web || true
 cat "$BACKUP/web.py" > web.py || fail "Не удалось восстановить web.py из $BACKUP"
 chmod 644 web.py
-docker compose -f compose.yaml start web || fail "Старый web.py восстановлен, но контейнер не запустился"
+docker compose -f compose.yaml up -d --no-deps --force-recreate web || fail "Старый web.py восстановлен, но контейнер не запустился"
 
 if wait_for_health; then
     echo "ROLLBACK OK: прежняя панель снова отвечает /healthz"
