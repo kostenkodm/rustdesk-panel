@@ -16,7 +16,8 @@
 - [ ] Backup/restore for the panel's own database.
 
 ## Phase 2 — Administration
-- [ ] Users and access roles inside the panel, 2FA.
+- [x] Local users and panel roles with bootstrap admin migration (0.4).
+- [ ] 2FA and external identity providers.
 - [ ] Audit administrative actions.
 - [x] Proof-of-protocol: read-only HBBS OnlineRequest CLI query and mocked protocol tests.
 - [x] Validate the OnlineRequest probe against the real NAS: 23 registered, 5 online, 18 offline at test time.
@@ -26,7 +27,8 @@
 - [ ] Version inventory and configuration management with authenticated agent or client API.
 
 ## Phase 3 — RustDesk integration
-- [ ] Evaluate address-book/API compatibility with supported RustDesk clients.
+- [x] Shared and private address books in the panel with role access and export (0.4).
+- [ ] Verify client-native address-book/API protocol compatibility with supported RustDesk clients.
 - [ ] Shared contacts and groups where client protocol supports it.
 - [ ] Access enforcement design at server/client layer — UI roles alone are not enforcement.
 - [ ] Session accounting from a verifiable event source, without inventing event records.
